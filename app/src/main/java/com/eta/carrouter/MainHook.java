@@ -8,6 +8,7 @@ import android.net.NetworkRequest;
 import android.net.wifi.WifiInfo;
 import android.net.wifi.WifiManager;
 import android.os.Build;
+import android.provider.Settings;
 
 import java.lang.reflect.Array;
 import java.lang.reflect.Field;
@@ -15,7 +16,7 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
@@ -28,14 +29,14 @@ import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
 /**
- * LSPosed module: while the phone is connected to the car head-unit Wi-Fi hotspot,
- * keep the cellular network as the system default (so every app still has internet),
- * and bind only the car-link app process back to that Wi-Fi for LAN access.
+ * LSPosed module: while the phone is connected to a Wi-Fi the user picked as a
+ * "car head-unit hotspot", keep the cellular network as the system default (so
+ * every app still has internet), and bind only the selected car-link apps back
+ * to that Wi-Fi for LAN access.
  *
- * Configuration (read at runtime, persist across reboot):
- *   setprop persist.carrouter.ssid "YourCarSSID"
- *   setprop persist.carrouter.apps "com.baidu.carlife,com.xxx.carlink"
- * If setprop is unavailable, edit DEFAULT_SSID / DEFAULT_APPS below and rebuild.
+ * Configuration lives in Settings.Global (written by SettingsActivity, readable
+ * here from system_server with no permission). A system property fallback is kept
+ * for headless use. Changes take effect on the next network event, no reboot.
  */
 public class MainHook implements IXposedHookLoadPackage {
 
@@ -45,14 +46,21 @@ public class MainHook implements IXposedHookLoadPackage {
     private static final int CAP_CAPTIVE = 17;    // NET_CAPABILITY_CAPTIVE_PORTAL
     private static final int TRANSPORT_WIFI = 1;  // NetworkCapabilities.TRANSPORT_WIFI
 
-    private static final String DEFAULT_SSID = "Cloudrive-020880";   // car head-unit hotspot
+    private static final String KEY_ENABLED = "carrouter_enabled";
+    private static final String KEY_SSIDS = "carrouter_ssids";   // newline separated
+    private static final String KEY_APPS = "carrouter_apps";     // comma separated
+
+    private static final String DEFAULT_SSIDS = "Cloudrive-020880";
     private static final String DEFAULT_APPS =
-            "com.baidu.carlife.xiaomi,com.mcarplay.app,com.baidu.carlife,com.qinggan.carlink,com.google.android.projection.gearhead";
+            "com.baidu.carlife.xiaomi,com.mcarplay.app,com.baidu.carlife,"
+                    + "com.qinggan.carlink,com.google.android.projection.gearhead";
 
     private static final WeakHashMap<Object, Boolean> STRIPPED = new WeakHashMap<>();
     private static final ThreadLocal<Boolean> BUSY = new ThreadLocal<>();
     private static Object sCs;
     private static Context sContext;
+
+    // ---------------- configuration (shared with SettingsActivity) ----------------
 
     private static String prop(String key, String def) {
         try {
@@ -64,6 +72,20 @@ public class MainHook implements IXposedHookLoadPackage {
         }
     }
 
+    private static String cfg(Context ctx, String key, String def, String propKey) {
+        // Settings.Global (UI) wins; system property is a fallback for headless use.
+        if (ctx != null) {
+            try {
+                String v = Settings.Global.getString(ctx.getContentResolver(), key);
+                if (v != null && !v.isEmpty()) return v;
+            } catch (Throwable ignored) {
+            }
+        }
+        String p = prop(propKey, null);
+        if (p != null && !p.isEmpty()) return p;
+        return def;
+    }
+
     private static String unquote(String s) {
         if (s == null) return "";
         s = s.trim();
@@ -72,28 +94,60 @@ public class MainHook implements IXposedHookLoadPackage {
         return s;
     }
 
-    private static String targetSsid() {
-        return unquote(prop("persist.carrouter.ssid", DEFAULT_SSID));
+    private static Set<String> splitSet(String raw, String sep) {
+        Set<String> out = new LinkedHashSet<>();
+        if (raw == null) return out;
+        for (String s : raw.split(sep)) {
+            s = unquote(s.trim());
+            if (!s.isEmpty() && !"<unknown ssid>".equalsIgnoreCase(s)) out.add(s);
+        }
+        return out;
     }
 
-    private static Set<String> carApps() {
-        Set<String> out = new HashSet<>();
-        String v = prop("persist.carrouter.apps", DEFAULT_APPS);
-        if (v == null) return out;
-        for (String p : v.split("[,;\\s]+")) if (!p.isEmpty()) out.add(p);
-        return out;
+    private static boolean enabled(Context ctx) {
+        if (ctx == null) return true;
+        return !"0".equals(cfg(ctx, KEY_ENABLED, "1", "persist.carrouter.enabled"));
+    }
+
+    private static Set<String> carSsids(Context ctx) {
+        if (ctx == null) return splitSet(DEFAULT_SSIDS, "[\\r\\n]+");
+        return splitSet(cfg(ctx, KEY_SSIDS, DEFAULT_SSIDS, "persist.carrouter.ssid"), "[\\r\\n]+");
+    }
+
+    private static Set<String> carApps(Context ctx) {
+        if (ctx == null) return splitSet(DEFAULT_APPS, "[,;\\s]+");
+        return splitSet(cfg(ctx, KEY_APPS, DEFAULT_APPS, "persist.carrouter.apps"), "[,;\\s]+");
+    }
+
+    private static boolean isCarSsid(Context ctx, String ssid) {
+        return !unquote(ssid).isEmpty() && carSsids(ctx).contains(unquote(ssid));
+    }
+
+    private static String currentSsid(Context ctx) {
+        if (ctx == null) return "";
+        try {
+            WifiManager wm = (WifiManager) ctx.getSystemService(Context.WIFI_SERVICE);
+            if (wm == null) return "";
+            WifiInfo wi = wm.getConnectionInfo();
+            return wi == null ? "" : unquote(wi.getSSID());
+        } catch (Throwable t) {
+            return "";
+        }
     }
 
     @Override
     public void handleLoadPackage(final XC_LoadPackage.LoadPackageParam lp) {
         if ("android".equals(lp.packageName)) {
             hookSystemServer(lp.classLoader);
-        } else if (carApps().contains(lp.packageName)) {
+        } else {
+            // Injected into every scoped app. Decide at runtime (on Application
+            // creation) whether this package is one of the selected car-link apps,
+            // so changing the selection in the UI takes effect on next app launch.
             hookCarApp(lp.classLoader);
         }
     }
 
-    /* ---- system_server: strip INTERNET from the car Wi-Fi by SSID, keep cellular default ---- */
+    /* ---- system_server: strip INTERNET from the selected car Wi-Fi, keep cellular default ---- */
 
     private void hookSystemServer(ClassLoader cl) {
         Class<?> cs = null;
@@ -159,10 +213,10 @@ public class MainHook implements IXposedHookLoadPackage {
         Object cs = sCs != null ? sCs : (p == null ? null : p.thisObject);
         if (cs == null) return;
         Context ctx = sContext != null ? sContext : findContext(cs, null);
-        String want = targetSsid();
         BUSY.set(true);
         try {
-            boolean match = !want.isEmpty() && want.equals(currentSsid(ctx));
+            if (!enabled(ctx)) return;   // master switch off -> do nothing
+            boolean match = isCarSsid(ctx, currentSsid(ctx));
             boolean changed = false;
             for (Object nai : allAgentInfos(cs)) {
                 NetworkCapabilities nc = (NetworkCapabilities) getField(nai, "networkCapabilities");
@@ -197,7 +251,10 @@ public class MainHook implements IXposedHookLoadPackage {
                     @Override
                     protected void afterHookedMethod(MethodHookParam p) {
                         try {
-                            bindToCarWifi((Context) p.thisObject);
+                            final Context ctx = (Context) p.thisObject;
+                            final String pkg = ctx.getPackageName();
+                            if (!enabled(ctx) || !carApps(ctx).contains(pkg)) return;
+                            bindToCarWifi(ctx);
                         } catch (Throwable t) {
                             XposedBridge.log(TAG + ": bind: " + t);
                         }
@@ -246,7 +303,7 @@ public class MainHook implements IXposedHookLoadPackage {
                 + ctx.getPackageName() + " -> " + net);
     }
 
-    /* ---- reflection helpers: locate NetworkAgentInfo across AOSP versions ---- */
+    /* ---- reflection helpers ---- */
 
     /**
      * NetworkCapabilities.addCapability/removeCapability are @hide in the public
@@ -347,18 +404,6 @@ public class MainHook implements IXposedHookLoadPackage {
             return (Context) at.getMethod("getSystemContext").invoke(th);
         } catch (Throwable t) {
             return null;
-        }
-    }
-
-    private static String currentSsid(Context ctx) {
-        if (ctx == null) return "";
-        try {
-            WifiManager wm = (WifiManager) ctx.getSystemService(Context.WIFI_SERVICE);
-            if (wm == null) return "";
-            WifiInfo wi = wm.getConnectionInfo();
-            return wi == null ? "" : unquote(wi.getSSID());
-        } catch (Throwable t) {
-            return "";
         }
     }
 
