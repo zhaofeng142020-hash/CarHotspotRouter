@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- Default LSPosed scope. Add your car-link package here if it is not listed. -->
+    <!-- Default LSPosed scope. The settings UI can add more car-link packages
+         at runtime (best-effort via root); otherwise tick them here in LSPosed Manager. -->
     <string-array name="scope">
         <item>android</item>
         <item>com.baidu.carlife.xiaomi</item>
