@@ -1,0 +1,34 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.eta.carrouter'
+    compileSdk 33
+
+    defaultConfig {
+        applicationId 'com.eta.carrouter'
+        minSdk 24
+        targetSdk 33
+        versionCode 1
+        versionName '1.0'
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+}
+
+dependencies {
+    // Xposed API is provided by LSPosed at runtime. The API jar is vendored in
+    // app/libs so CI builds fully offline without any extra Maven repository.
+    compileOnly fileTree(dir: 'libs', include: ['*.jar'])
+}
