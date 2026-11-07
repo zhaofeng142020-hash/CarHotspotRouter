@@ -169,14 +169,14 @@ public class MainHook implements IXposedHookLoadPackage {
                 if (nc == null || !nc.hasTransport(TRANSPORT_WIFI)) continue;
                 boolean noInternet = !nc.hasCapability(CAP_INTERNET);
                 if (match && !noInternet) {
-                    nc.removeCapability(CAP_INTERNET);
-                    nc.removeCapability(CAP_VALIDATED);
-                    nc.removeCapability(CAP_CAPTIVE);
+                    setCap(nc, CAP_INTERNET, false);
+                    setCap(nc, CAP_VALIDATED, false);
+                    setCap(nc, CAP_CAPTIVE, false);
                     STRIPPED.put(nai, Boolean.TRUE);
                     changed = true;
                 } else if (!match && noInternet && STRIPPED.containsKey(nai)) {
-                    nc.addCapability(CAP_INTERNET);   // restore after leaving the car hotspot
-                    nc.addCapability(CAP_VALIDATED);
+                    setCap(nc, CAP_INTERNET, true);   // restore after leaving the car hotspot
+                    setCap(nc, CAP_VALIDATED, true);
                     STRIPPED.remove(nai);
                     changed = true;
                 }
@@ -247,6 +247,21 @@ public class MainHook implements IXposedHookLoadPackage {
     }
 
     /* ---- reflection helpers: locate NetworkAgentInfo across AOSP versions ---- */
+
+    /**
+     * NetworkCapabilities.addCapability/removeCapability are @hide in the public
+     * SDK stub, so call them reflectively. They exist on a real device (the module
+     * runs inside system_server, which can access hidden APIs).
+     */
+    private static void setCap(NetworkCapabilities nc, int cap, boolean add) {
+        try {
+            String name = add ? "addCapability" : "removeCapability";
+            Method m = NetworkCapabilities.class.getMethod(name, int.class);
+            m.invoke(nc, cap);
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + ": setCap(" + cap + "," + add + "): " + t);
+        }
+    }
 
     private static Object getField(Object o, String name) {
         Class<?> c = o.getClass();
