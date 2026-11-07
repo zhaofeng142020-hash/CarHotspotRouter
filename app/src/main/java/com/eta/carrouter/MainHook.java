@@ -146,7 +146,6 @@ public class MainHook implements IXposedHookLoadPackage {
     public void handleLoadPackage(final XC_LoadPackage.LoadPackageParam lp) {
         if ("android".equals(lp.packageName)) {
             hookSystemServer(lp.classLoader);
-            startWifiListSync();
         } else {
             // Injected into every scoped app. Decide at runtime (on Application
             // creation) whether this package is one of the selected car-link apps,
@@ -223,7 +222,7 @@ public class MainHook implements IXposedHookLoadPackage {
     private void hookSystemServer(ClassLoader cl) {
         Class<?> cs = null;
         for (String n : new String[]{
-                "com.android.server.connectivity.ConnectivityService",  // Android 9+
+                "com.android.server.connectivity.ConnectivityService",  // Android 9-11
                 "com.android.server.ConnectivityService"}) {             // Android 7 / 8
             try {
                 cs = XposedHelpers.findClass(n, cl);
@@ -231,19 +230,30 @@ public class MainHook implements IXposedHookLoadPackage {
             } catch (Throwable ignored) {
             }
         }
-        if (cs == null) {
-            XposedBridge.log(TAG + ": ConnectivityService not found");
-            return;
+        if (cs != null) {
+            // older ROMs: class is on the boot classpath, hook constructors to
+            // capture the instance right away
+            hookCsClass(cs);
+            XposedBridge.hookAllConstructors(cs, new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam p) {
+                    sCs = p.thisObject;
+                    sContext = findContext(p.thisObject, p.args);
+                }
+            });
+            XposedBridge.log(TAG + ": hooked ConnectivityService from boot classloader");
+        } else {
+            // Android 12+: ConnectivityService lives in the com.android.tethering
+            // APEX, invisible to the boot classloader. Discover it through the
+            // registered "connectivity" binder once system_server is up.
+            XposedBridge.log(TAG + ": not on boot classloader, starting binder discovery");
+            startBinderDiscovery();
         }
+        startWifiListSync();
+    }
 
-        XposedBridge.hookAllConstructors(cs, new XC_MethodHook() {
-            @Override
-            protected void afterHookedMethod(MethodHookParam p) {
-                sCs = p.thisObject;
-                sContext = findContext(p.thisObject, p.args);
-            }
-        });
-
+    /** hook the interesting ConnectivityService methods on a class found anywhere */
+    private void hookCsClass(final Class<?> cs) {
         final String[] keys = {
                 "updateCapabilities", "registerNetworkAgent", "rematchAllNetworksAndRequests",
                 "rematchNetworkAndRequests", "updateNetworkInfo", "handleNetworkUnvalidated",
@@ -276,7 +286,125 @@ public class MainHook implements IXposedHookLoadPackage {
                 }
             }
         }
-        XposedBridge.log(TAG + ": hooked " + n + " ConnectivityService methods");
+        XposedBridge.log(TAG + ": hooked " + n + " ConnectivityService methods on "
+                + cs.getName());
+    }
+
+    /**
+     * Poll ServiceManager for the connectivity binder. The binder either IS the
+     * ConnectivityService (then capture it directly) or lives in the same
+     * classloader (then we can finally load the class and hook it), and if it is
+     * a wrapper we look for the real service instance among its fields.
+     */
+    private void startBinderDiscovery() {
+        final Thread t = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                for (int i = 0; i < 30; i++) {
+                    try {
+                        Object binder = serviceManagerGet("connectivity");
+                        if (binder == null) {
+                            Thread.sleep(5000);
+                            continue;
+                        }
+                        Class<?> binderClass = binder.getClass();
+                        String name = binderClass.getName();
+
+                        if (name.endsWith("ConnectivityService")) {
+                            sCs = binder;
+                            hookCsClass(binderClass);
+                            sContext = findContext(binder, null);
+                            XposedBridge.log(TAG + ": found ConnectivityService instance via binder");
+                            kickOnce();
+                            return;
+                        }
+
+                        // wrapper: its classloader can load the real class
+                        try {
+                            Class<?> real = XposedHelpers.findClass(
+                                    "com.android.server.connectivity.ConnectivityService",
+                                    binderClass.getClassLoader());
+                            hookCsClass(real);
+                            Object inst = findInstanceOf(binder, real);
+                            if (inst != null) sCs = inst;
+                            sContext = findContext(binder, null);
+                            XposedBridge.log(TAG + ": hooked via wrapper classloader, name=" + name);
+                            kickOnce();
+                            return;
+                        } catch (Throwable tt) {
+                            XposedBridge.log(TAG + ": wrapper load failed: " + tt);
+                        }
+                    } catch (Throwable e) {
+                        XposedBridge.log(TAG + ": discovery: " + e);
+                    }
+                    try {
+                        Thread.sleep(5000);
+                    } catch (InterruptedException ie) {
+                        return;
+                    }
+                }
+                XposedBridge.log(TAG + ": binder discovery gave up");
+            }
+        }, "CarRouterDiscovery");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    private static Object serviceManagerGet(String name) {
+        try {
+            Class<?> sm = Class.forName("android.os.ServiceManager");
+            return sm.getMethod("getService", String.class).invoke(null, name);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /** depth-first search for a field holding an instance of targetClass */
+    private static Object findInstanceOf(Object root, Class<?> targetClass) {
+        if (root == null) return null;
+        if (targetClass.isInstance(root)) return root;
+        ArrayList<Object> seen = new ArrayList<>();
+        ArrayList<Object> queue = new ArrayList<>();
+        queue.add(root);
+        int scanned = 0;
+        while (!queue.isEmpty() && scanned < 300) {
+            Object o = queue.remove(0);
+            if (o == null || seen.contains(o)) continue;
+            seen.add(o);
+            scanned++;
+            Class<?> c = o.getClass();
+            while (c != null && c != Object.class) {
+                for (Field f : c.getDeclaredFields()) {
+                    if (Modifier.isStatic(f.getModifiers())) continue;
+                    if (!f.getType().isAssignableFrom(targetClass)
+                            && !f.getType().isInstance(targetClass)) {
+                        // still inspect non-primitive fields recursively below
+                    }
+                    try {
+                        f.setAccessible(true);
+                        Object v = f.get(o);
+                        if (v == null || seen.contains(v)) continue;
+                        if (targetClass.isInstance(v)) return v;
+                        if (v.getClass().getName().startsWith("android.")
+                                || v.getClass().getName().startsWith("com.android.")) {
+                            queue.add(v);
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                }
+                c = c.getSuperclass();
+            }
+        }
+        return null;
+    }
+
+    /** run enforce once from the background thread (no hook context needed) */
+    private static void kickOnce() {
+        try {
+            enforce(null);
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + ": kick: " + t);
+        }
     }
 
     private static void enforce(XC_MethodHook.MethodHookParam p) {
