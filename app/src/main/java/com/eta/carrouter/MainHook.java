@@ -5,9 +5,12 @@ import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkCapabilities;
 import android.net.NetworkRequest;
+import android.net.wifi.WifiConfiguration;
 import android.net.wifi.WifiInfo;
 import android.net.wifi.WifiManager;
 import android.os.Build;
+import android.os.Handler;
+import android.os.HandlerThread;
 import android.provider.Settings;
 
 import java.lang.reflect.Array;
@@ -59,6 +62,9 @@ public class MainHook implements IXposedHookLoadPackage {
     private static final ThreadLocal<Boolean> BUSY = new ThreadLocal<>();
     private static Object sCs;
     private static Context sContext;
+    private static Handler sSyncHandler;
+
+    private static final String KEY_WIFI_LIST = "carrouter_wifi_list"; // newline separated
 
     // ---------------- configuration (shared with SettingsActivity) ----------------
 
@@ -139,11 +145,75 @@ public class MainHook implements IXposedHookLoadPackage {
     public void handleLoadPackage(final XC_LoadPackage.LoadPackageParam lp) {
         if ("android".equals(lp.packageName)) {
             hookSystemServer(lp.classLoader);
+            startWifiListSync();
         } else {
             // Injected into every scoped app. Decide at runtime (on Application
             // creation) whether this package is one of the selected car-link apps,
             // so changing the selection in the UI takes effect on next app launch.
             hookCarApp(lp.classLoader);
+        }
+    }
+
+    /* ---- periodic sync of saved Wi-Fi names into Settings.Global ----
+     * Runs inside system_server, which can enumerate saved networks and write
+     * Global settings without any permission. The settings UI just reads the
+     * list, so it needs no location permission and no root of its own. */
+
+    private static void startWifiListSync() {
+        HandlerThread t = new HandlerThread("CarRouterSync");
+        t.start();
+        sSyncHandler = new Handler(t.getLooper());
+        sSyncHandler.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    syncWifiListOnce();
+                } catch (Throwable th) {
+                    XposedBridge.log(TAG + ": sync: " + th);
+                }
+                sSyncHandler.postDelayed(this, 60_000L);
+            }
+        }, 15_000L);
+    }
+
+    private static void syncWifiListOnce() {
+        Context ctx = sContext;
+        if (ctx == null) return;
+        LinkedHashSet<String> names = new LinkedHashSet<>();
+        try {
+            WifiManager wm = (WifiManager) ctx.getSystemService(Context.WIFI_SERVICE);
+            if (wm != null) {
+                List<WifiConfiguration> cfgs = wm.getConfiguredNetworks();
+                if (cfgs != null) {
+                    for (WifiConfiguration c : cfgs) {
+                        String s = unquote(c.SSID);
+                        if (!s.isEmpty() && !"<unknown ssid>".equalsIgnoreCase(s)) names.add(s);
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        String cur = currentSsid(ctx);
+        if (!cur.isEmpty()) names.add(cur);
+
+        // write only when changed to avoid settings churn
+        String prev = null;
+        try {
+            prev = Settings.Global.getString(ctx.getContentResolver(), KEY_WIFI_LIST);
+        } catch (Throwable ignored) {
+        }
+        StringBuilder b = new StringBuilder();
+        for (String s : names) {
+            if (b.length() > 0) b.append('\n');
+            b.append(s);
+        }
+        if (!b.toString().equals(prev == null ? "" : prev)) {
+            try {
+                Settings.Global.putString(ctx.getContentResolver(), KEY_WIFI_LIST, b.toString());
+                XposedBridge.log(TAG + ": wifi list synced (" + names.size() + " networks)");
+            } catch (Throwable th) {
+                XposedBridge.log(TAG + ": wifi list write failed: " + th);
+            }
         }
     }
 
