@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Default LSPosed scope. Add your car-link package here if it is not listed. -->
+    <string-array name="scope">
+        <item>android</item>
+        <item>com.baidu.carlife</item>
+        <item>com.qinggan.carlink</item>
+        <item>com.google.android.projection.gearhead</item>
+    </string-array>
+</resources>
