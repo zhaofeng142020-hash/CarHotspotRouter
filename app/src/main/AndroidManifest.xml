@@ -1,15 +1,54 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- Allows the settings UI to write the shared config to Settings.Global.
+         Granted once via root:
+         pm grant com.eta.carrouter android.permission.WRITE_SECURE_SETTINGS -->
+    <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
+
     <application
         android:label="CarHotspotRouter"
-        android:hasCode="true">
+        android:hasCode="true"
+        android:allowBackup="true">
+
+        <!-- Launcher entry. Hidden on demand by disabling this activity-alias. -->
+        <activity-alias
+            android:name=".Launcher"
+            android:targetActivity=".SettingsActivity"
+            android:label="CarHotspotRouter"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <!-- Main settings screen. Exported so LSPosed Manager / am start can open
+             it even when the launcher icon is hidden. -->
+        <activity
+            android:name=".SettingsActivity"
+            android:label="CarHotspotRouter 设置"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.APPLICATION_PREFERENCES" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+            <!-- LSPosed Manager "module settings" entry -->
+            <intent-filter>
+                <action android:name="org.lsposed.manager.action.MODULE_SETTINGS" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
 
         <!-- LSPosed module metadata -->
         <meta-data android:name="xposedmodule" android:value="true" />
         <meta-data
             android:name="xposeddescription"
-            android:value="Keep mobile data as the default network while connected to a car head-unit hotspot; route only the car-link app back to the Wi-Fi LAN." />
+            android:value="选中任意 WiFi 作为车机互联热点：该 WiFi 只承载车机局域网，所有应用继续走手机流量。可在设置里选择热点与车机 App，并可隐藏桌面图标。" />
         <meta-data android:name="xposedminversion" android:value="82" />
         <meta-data
             android:name="xposedscope"
