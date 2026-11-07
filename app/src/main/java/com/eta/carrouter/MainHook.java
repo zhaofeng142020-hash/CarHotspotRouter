@@ -45,9 +45,9 @@ public class MainHook implements IXposedHookLoadPackage {
     private static final int CAP_CAPTIVE = 17;    // NET_CAPABILITY_CAPTIVE_PORTAL
     private static final int TRANSPORT_WIFI = 1;  // NetworkCapabilities.TRANSPORT_WIFI
 
-    private static final String DEFAULT_SSID = "";   // e.g. "MyCar_AP" - empty = disabled
+    private static final String DEFAULT_SSID = "Cloudrive-020880";   // car head-unit hotspot
     private static final String DEFAULT_APPS =
-            "com.baidu.carlife,com.qinggan.carlink,com.google.android.projection.gearhead";
+            "com.baidu.carlife.xiaomi,com.mcarplay.app,com.baidu.carlife,com.qinggan.carlink,com.google.android.projection.gearhead";
 
     private static final WeakHashMap<Object, Boolean> STRIPPED = new WeakHashMap<>();
     private static final ThreadLocal<Boolean> BUSY = new ThreadLocal<>();
